@@ -24,15 +24,15 @@ fn cast(msg string, v Value, to Type) ?Value {
 		.is_bigint {
 			match to.typ {
 				.is_smallint {
-					if v.int_value < -32768 || v.int_value > 32767 {
-						return sqlstate_22003()
+					if v.int_value() < -32768 || v.int_value() > 32767 {
+						return sqlstate_22003(0, 0)
 					}
 
 					return v
 				}
 				.is_integer {
-					if v.int_value < -2147483648 || v.int_value > 2147483647 {
-						return sqlstate_22003()
+					if v.int_value() < -2147483648 || v.int_value() > 2147483647 {
+						return sqlstate_22003(0, 0)
 					}
 
 					return v
@@ -41,7 +41,7 @@ fn cast(msg string, v Value, to Type) ?Value {
 					return v
 				}
 				.is_double_precision, .is_real {
-					return new_double_precision_value(v.int_value)
+					return new_double_precision_value(v.int_value())
 				}
 				else {}
 			}
@@ -57,10 +57,13 @@ fn cast(msg string, v Value, to Type) ?Value {
 		.is_double_precision {
 			match to.typ {
 				.is_bigint, .is_integer, .is_smallint {
-					return new_bigint_value(i64(v.f64_value))
+					return new_bigint_value(i64(v.f64_value()))
 				}
 				.is_double_precision, .is_real {
 					return v
+				}
+				.is_numeric {
+					return new_numeric_value(new_numeric_from_string(v.str()))
 				}
 				else {}
 			}
@@ -71,7 +74,7 @@ fn cast(msg string, v Value, to Type) ?Value {
 					return v
 				}
 				.is_double_precision, .is_real {
-					return new_double_precision_value(v.int_value)
+					return new_double_precision_value(v.int_value())
 				}
 				else {}
 			}
@@ -79,7 +82,7 @@ fn cast(msg string, v Value, to Type) ?Value {
 		.is_real {
 			match to.typ {
 				.is_bigint, .is_integer, .is_smallint {
-					return new_bigint_value(i64(v.f64_value))
+					return new_bigint_value(i64(v.f64_value()))
 				}
 				.is_double_precision, .is_real {
 					return v
@@ -93,7 +96,7 @@ fn cast(msg string, v Value, to Type) ?Value {
 					return v
 				}
 				.is_double_precision, .is_real {
-					return new_double_precision_value(v.int_value)
+					return new_double_precision_value(v.int_value())
 				}
 				else {}
 			}
@@ -150,6 +153,40 @@ fn cast(msg string, v Value, to Type) ?Value {
 			match to.typ {
 				.is_time_without_time_zone {
 					return v
+				}
+				else {}
+			}
+		}
+		.is_decimal {
+			match to.typ {
+				.is_decimal {
+					return v
+				}
+				else {}
+			}
+		}
+		.is_numeric {
+			match to.typ {
+				.is_numeric {
+					// When converting NUMERIC(p,s) to a different NUMERIC(p,s)
+					// we cannot allow a loss on the whole number part, but we
+					// do allow rounding if the scale changes.
+					if to.size > 0 {
+						if v.numeric_value().whole_digits() > (to.size - to.scale) {
+							return sqlstate_22003(to.size, to.scale)
+						}
+
+						// TODO(elliotchance): Avoid creating a new value if it
+						//  doesn't need to be rounded.
+						return new_numeric_value(v.numeric_value().round(to.scale))
+					}
+
+					return v
+				}
+				.is_double_precision {
+					if to.scale == 0 {
+						return new_double_precision_value(v.str().f64())
+					}
 				}
 				else {}
 			}

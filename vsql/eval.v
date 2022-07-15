@@ -104,10 +104,10 @@ fn eval_as_type(conn &Connection, data Row, e Expr, params map[string]Value) ?Ty
 			return func.return_type
 		}
 		CountAllExpr {
-			return new_type('INTEGER', 0)
+			return new_type('INTEGER', 0, 0)
 		}
 		BetweenExpr, NullExpr, TruthExpr, LikeExpr, SimilarExpr {
-			return new_type('BOOLEAN', 0)
+			return new_type('BOOLEAN', 0, 0)
 		}
 		Parameter {
 			p := params[e.name] or { return sqlstate_42p02(e.name) }
@@ -121,10 +121,12 @@ fn eval_as_type(conn &Connection, data Row, e Expr, params map[string]Value) ?Ty
 			return eval_as_type(conn, data, e.expr, params)
 		}
 		BinaryExpr {
-			// TODO(elliotchance): This is not correct, we would have to return
-			// the highest resolution type (need to check the SQL standard about
-			// this behavior).
-			return eval_as_type(conn, data, e.left, params)
+			left := eval_as_type(conn, data, e.left, params)?
+			right := eval_as_type(conn, data, e.right, params)?
+
+			l, _ := coerce_numeric_binary(new_empty_value(left), e.op, new_empty_value(right))?
+
+			return l.typ
 		}
 		Identifier {
 			col := data.data[e.name] or { return sqlstate_42601('unknown column: $e.name') }
@@ -135,22 +137,22 @@ fn eval_as_type(conn &Connection, data Row, e Expr, params map[string]Value) ?Ty
 			return sqlstate_42601('invalid expression provided: $e.str()')
 		}
 		CurrentDateExpr {
-			return new_type('DATE', 0)
+			return new_type('DATE', 0, 0)
 		}
 		CurrentTimeExpr {
-			return new_type('TIME WITH TIME ZONE', 0)
+			return new_type('TIME WITH TIME ZONE', 0, 0)
 		}
 		CurrentTimestampExpr {
-			return new_type('TIMESTAMP WITH TIME ZONE', 0)
+			return new_type('TIMESTAMP WITH TIME ZONE', 0, 0)
 		}
 		LocalTimeExpr {
-			return new_type('TIME WITHOUT TIME ZONE', 0)
+			return new_type('TIME WITHOUT TIME ZONE', 0, 0)
 		}
 		LocalTimestampExpr {
-			return new_type('TIMESTAMP WITHOUT TIME ZONE', 0)
+			return new_type('TIMESTAMP WITHOUT TIME ZONE', 0, 0)
 		}
 		SubstringExpr, TrimExpr {
-			return new_type('CHARACTER VARYING', 0)
+			return new_type('CHARACTER VARYING', 0, 0)
 		}
 		UntypedNullExpr {
 			return error('cannot determine type of untyped NULL')
@@ -291,7 +293,7 @@ fn eval_as_bool(conn &Connection, data Row, e Expr, params map[string]Value) ?bo
 	v := eval_as_value(conn, data, e, params)?
 
 	if v.typ.typ == .is_boolean {
-		return v.bool_value == .is_true
+		return v.bool_value() == .is_true
 	}
 
 	return sqlstate_42804('in expression', 'BOOLEAN', v.typ.str())
@@ -345,21 +347,21 @@ fn eval_null(conn &Connection, data Row, e NullExpr, params map[string]Value) ?V
 
 fn eval_truth(conn &Connection, data Row, e TruthExpr, params map[string]Value) ?Value {
 	value := eval_as_value(conn, data, e.expr, params)?
-	result := match value.bool_value {
+	result := match value.bool_value() {
 		.is_true {
-			match e.value.bool_value {
+			match e.value.bool_value() {
 				.is_true { new_boolean_value(true) }
 				.is_false, .is_unknown { new_boolean_value(false) }
 			}
 		}
 		.is_false {
-			match e.value.bool_value {
+			match e.value.bool_value() {
 				.is_true, .is_unknown { new_boolean_value(false) }
 				.is_false { new_boolean_value(true) }
 			}
 		}
 		.is_unknown {
-			match e.value.bool_value {
+			match e.value.bool_value() {
 				.is_true, .is_false { new_boolean_value(false) }
 				.is_unknown { new_boolean_value(true) }
 			}
@@ -378,16 +380,16 @@ fn eval_trim(conn &Connection, data Row, e TrimExpr, params map[string]Value) ?V
 	character := eval_as_value(conn, data, e.character, params)?
 
 	if e.specification == 'LEADING' {
-		return new_varchar_value(source.string_value.trim_left(character.string_value),
+		return new_varchar_value(source.string_value().trim_left(character.string_value()),
 			0)
 	}
 
 	if e.specification == 'TRAILING' {
-		return new_varchar_value(source.string_value.trim_right(character.string_value),
+		return new_varchar_value(source.string_value().trim_right(character.string_value()),
 			0)
 	}
 
-	return new_varchar_value(source.string_value.trim(character.string_value), 0)
+	return new_varchar_value(source.string_value().trim(character.string_value()), 0)
 }
 
 fn eval_like(conn &Connection, data Row, e LikeExpr, params map[string]Value) ?Value {
@@ -395,13 +397,13 @@ fn eval_like(conn &Connection, data Row, e LikeExpr, params map[string]Value) ?V
 	right := eval_as_value(conn, data, e.right, params)?
 
 	// Make sure we escape any regexp characters.
-	escaped_regex := right.string_value.replace('+', '\\+').replace('?', '\\?').replace('*',
+	escaped_regex := right.string_value().replace('+', '\\+').replace('?', '\\?').replace('*',
 		'\\*').replace('|', '\\|').replace('.', '\\.').replace('(', '\\(').replace(')',
 		'\\)').replace('[', '\\[').replace('{', '\\{').replace('_', '.').replace('%',
 		'.*')
 
 	mut re := regex.regex_opt('^$escaped_regex$')?
-	result := re.matches_string(left.string_value)
+	result := re.matches_string(left.string_value())
 
 	if e.not {
 		return new_boolean_value(!result)
@@ -415,7 +417,7 @@ fn eval_substring(conn &Connection, data Row, e SubstringExpr, params map[string
 	from := int((eval_as_value(conn, data, e.from, params)?).as_int() - 1)
 
 	if e.using == 'CHARACTERS' {
-		characters := value.string_value.runes()
+		characters := value.string_value().runes()
 
 		if from >= characters.len || from < 0 {
 			return new_varchar_value('', 0)
@@ -429,16 +431,16 @@ fn eval_substring(conn &Connection, data Row, e SubstringExpr, params map[string
 		return new_varchar_value(characters[from..from + @for].string(), 0)
 	}
 
-	if from >= value.string_value.len || from < 0 {
+	if from >= value.string_value().len || from < 0 {
 		return new_varchar_value('', 0)
 	}
 
-	mut @for := value.string_value.len - from
+	mut @for := value.string_value().len - from
 	if e.@for !is NoExpr {
 		@for = int((eval_as_value(conn, data, e.@for, params)?).as_int())
 	}
 
-	return new_varchar_value(value.string_value.substr(from, from + @for), 0)
+	return new_varchar_value(value.string_value().substr(from, from + @for), 0)
 }
 
 fn eval_binary(conn &Connection, data Row, e BinaryExpr, params map[string]Value) ?Value {
@@ -448,64 +450,66 @@ fn eval_binary(conn &Connection, data Row, e BinaryExpr, params map[string]Value
 	match e.op {
 		'=', '<>', '>', '<', '>=', '<=' {
 			if left.typ.uses_string() && right.typ.uses_string() {
-				return eval_cmp<string>(left.string_value, right.string_value, e.op)
+				return eval_cmp<string>(left.string_value(), right.string_value(), e.op)
 			}
 
 			l, r := coerce_numeric_binary(left, e.op, right)?
 
 			if l.typ.uses_f64() {
-				return eval_cmp<f64>(l.f64_value, r.f64_value, e.op)
+				return eval_cmp<f64>(l.f64_value(), r.f64_value(), e.op)
 			} else {
-				return eval_cmp<i64>(l.int_value, r.int_value, e.op)
+				return eval_cmp<i64>(l.int_value(), r.int_value(), e.op)
 			}
 		}
 		'||' {
 			if left.typ.uses_string() && right.typ.uses_string() {
-				return new_varchar_value(left.string_value + right.string_value, 0)
+				return new_varchar_value(left.string_value() + right.string_value(), 0)
 			}
 		}
 		'+' {
 			l, r := coerce_numeric_binary(left, e.op, right)?
 
 			if l.typ.uses_f64() {
-				return new_double_precision_value(l.f64_value + r.f64_value)
+				return new_double_precision_value(l.f64_value() + r.f64_value())
+			} else if l.typ.uses_numeric() {
+				return new_numeric_value(l.numeric_value().add(r.numeric_value()))
 			} else {
-				return new_bigint_value(l.int_value + r.int_value)
+				return new_bigint_value(l.int_value() + r.int_value())
 			}
 		}
 		'-' {
 			l, r := coerce_numeric_binary(left, e.op, right)?
 
 			if l.typ.uses_f64() {
-				return new_double_precision_value(l.f64_value - r.f64_value)
+				return new_double_precision_value(l.f64_value() - r.f64_value())
 			} else {
-				return new_bigint_value(l.int_value - r.int_value)
+				return new_bigint_value(l.int_value() - r.int_value())
 			}
 		}
 		'*' {
 			l, r := coerce_numeric_binary(left, e.op, right)?
 
 			if l.typ.uses_f64() {
-				return new_double_precision_value(l.f64_value * r.f64_value)
+				return new_double_precision_value(l.f64_value() * r.f64_value())
 			} else {
-				return new_bigint_value(l.int_value * r.int_value)
+				return new_bigint_value(l.int_value() * r.int_value())
 			}
 		}
 		'/' {
 			l, r := coerce_numeric_binary(left, e.op, right)?
 
 			if l.typ.uses_f64() {
-				if r.f64_value == 0 {
+				if r.f64_value() == 0 {
 					return sqlstate_22012() // division by zero
 				}
 
-				return new_double_precision_value(l.f64_value / r.f64_value)
+				return new_double_precision_value(l.f64_value() / r.f64_value())
 			} else {
-				if r.int_value == 0 {
+				if r.int_value() == 0 {
 					return sqlstate_22012() // division by zero
 				}
 
-				return new_bigint_value(l.int_value / r.int_value)
+				return new_bigint_value(l.int_value() / r.int_value())
 			}
 		}
 		'AND' {
@@ -525,9 +529,9 @@ fn eval_binary(conn &Connection, data Row, e BinaryExpr, params map[string]Value
 }
 
 fn eval_and(left Value, right Value) Value {
-	return match left.bool_value {
+	return match left.bool_value() {
 		.is_true {
-			match right.bool_value {
+			match right.bool_value() {
 				.is_true { new_boolean_value(true) }
 				.is_false { new_boolean_value(false) }
 				.is_unknown { new_unknown_value() }
@@ -537,7 +541,7 @@ fn eval_and(left Value, right Value) Value {
 			new_boolean_value(false)
 		}
 		.is_unknown {
-			match right.bool_value {
+			match right.bool_value() {
 				.is_true { new_unknown_value() }
 				.is_false { new_boolean_value(false) }
 				.is_unknown { new_unknown_value() }
@@ -547,19 +551,19 @@ fn eval_and(left Value, right Value) Value {
 }
 
 fn eval_or(left Value, right Value) Value {
-	return match left.bool_value {
+	return match left.bool_value() {
 		.is_true {
 			new_boolean_value(true)
 		}
 		.is_false {
-			match right.bool_value {
+			match right.bool_value() {
 				.is_true { new_boolean_value(true) }
 				.is_false { new_boolean_value(false) }
 				.is_unknown { new_unknown_value() }
 			}
 		}
 		.is_unknown {
-			match right.bool_value {
+			match right.bool_value() {
 				.is_true { new_boolean_value(true) }
 				.is_false { new_unknown_value() }
 				.is_unknown { new_unknown_value() }
@@ -569,7 +573,7 @@ fn eval_or(left Value, right Value) Value {
 }
 
 fn eval_not(x Value) Value {
-	return match x.bool_value {
+	return match x.bool_value() {
 		.is_true { new_boolean_value(false) }
 		.is_false { new_boolean_value(true) }
 		.is_unknown { new_unknown_value() }
@@ -577,11 +581,6 @@ fn eval_not(x Value) Value {
 }
 
 fn coerce_numeric_binary(left Value, op string, right Value) ?(Value, Value) {
-	if (!left.typ.uses_f64() && !left.typ.uses_int())
-		|| (!right.typ.uses_f64() && !right.typ.uses_int()) {
-		return sqlstate_42804('cannot $left.typ $op $right.typ', 'another type', '$left.typ and $right.typ')
-	}
-
 	// If they are already both the same, there is nothing to coerce.
 	if left.typ.uses_f64() && right.typ.uses_f64() {
 		return left, right
@@ -591,38 +590,38 @@ fn coerce_numeric_binary(left Value, op string, right Value) ?(Value, Value) {
 		return left, right
 	}
 
-	// If they are both coercable this means that we have two constants like
-	// "2.4 * 12". In this case we need to make sure we pick the more precise
-	// type.
-	//
-	// TODO(elliotchance): This shouldn't be needed when we support NUMERIC
-	//  types.
-	//
-	// TODO(elliotchance): It would be nice to reduce these constant expressions
-	//  to avoid evaulating them for each row.
-	if left.is_coercible && right.is_coercible {
-		if left.typ.uses_f64() || right.typ.uses_f64() {
-			return new_double_precision_value(left.as_f64()), new_double_precision_value(right.as_f64())
-		}
-
-		return new_bigint_value(left.as_int()), new_bigint_value(right.as_int())
+	if left.typ.uses_numeric() && right.typ.uses_numeric() {
+		return left, right
 	}
 
-	// Only when they are different do we try to coerce one to the other.
-	if left.is_coercible {
+	// Otherwise coerce one of them.
+	if left.typ.str() == 'NUMERIC' {
 		if right.typ.uses_f64() {
-			return new_double_precision_value(left.int_value), right
+			return new_double_precision_value(left.as_f64()), right
 		}
 
-		return new_bigint_value(i64(left.f64_value)), right
+		if right.typ.uses_numeric() {
+			return new_numeric_value(new_numeric_from_string(left.str())), right
+		}
+
+		if right.typ.uses_int() {
+			return new_bigint_value(left.as_int()), right
+		}
 	}
 
-	if right.is_coercible {
+	// Otherwise coerce one of them.
+	if right.typ.str() == 'NUMERIC' {
 		if left.typ.uses_f64() {
-			return left, new_double_precision_value(right.int_value)
+			return left, new_double_precision_value(right.as_f64())
 		}
 
-		return left, new_bigint_value(i64(right.f64_value))
+		if left.typ.uses_numeric() {
+			return left, new_numeric_value(new_numeric_from_string(right.str()))
+		}
+
+		if left.typ.uses_int() {
+			return left, new_bigint_value(right.as_int())
+		}
 	}
 
 	return sqlstate_42804('cannot $left.typ $op $right.typ', 'another type', '$left.typ and $right.typ')
@@ -638,21 +637,28 @@ fn eval_unary(conn &Connection, data Row, e UnaryExpr, params map[string]Value) 
 			// the expression.
 
 			if value.typ.uses_f64() {
-				mut v := new_double_precision_value(-value.f64_value)
-				v.is_coercible = value.is_coercible
+				mut v := new_double_precision_value(-value.f64_value())
+				v.typ.is_coercible = value.typ.is_coercible
 
 				return v
 			}
 
 			if value.typ.uses_int() {
-				mut v := new_bigint_value(-value.int_value)
-				v.is_coercible = value.is_coercible
+				mut v := new_bigint_value(-value.int_value())
+				v.typ.is_coercible = value.typ.is_coercible
+
+				return v
+			}
+
+			if value.typ.uses_numeric() {
+				mut v := new_numeric_value(value.numeric_value().neg())
+				v.typ.is_coercible = value.typ.is_coercible
 
 				return v
 			}
 		}
 		'+' {
-			if value.typ.uses_f64() || value.typ.uses_int() {
+			if value.typ.uses_f64() || value.typ.uses_int() || value.typ.uses_numeric() {
 				return value
 			}
 		}
@@ -712,9 +718,9 @@ fn eval_similar(conn &Connection, data Row, e SimilarExpr, params map[string]Val
 	left := eval_as_value(conn, data, e.left, params)?
 	right := eval_as_value(conn, data, e.right, params)?
 
-	mut re := regex.regex_opt('^${right.string_value.replace('.', '\\.').replace('_',
+	mut re := regex.regex_opt('^${right.string_value().replace('.', '\\.').replace('_',
 		'.').replace('%', '.*')}$')?
-	result := re.matches_string(left.string_value)
+	result := re.matches_string(left.string_value())
 
 	if e.not {
 		return new_boolean_value(!result)

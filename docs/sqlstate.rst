@@ -70,6 +70,10 @@ in-flight transactions is full.
   INSERT INTO foo (x) VALUES (-32769);
   -- error 22003: numeric value out of range
 
+  CREATE TABLE foo (bar NUMERIC(3));
+  INSERT INTO foo (bar) VALUES (1234);
+  -- error 22003: numeric value out of range
+
 ``22012`` division by zero
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 

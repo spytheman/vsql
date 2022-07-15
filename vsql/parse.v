@@ -92,43 +92,43 @@ fn parse_column_definition2(column_name Identifier, data_type Type, constraint b
 }
 
 fn parse_bigint() ?Type {
-	return new_type('BIGINT', 0)
+	return new_type('BIGINT', 0, 0)
 }
 
 fn parse_integer() ?Type {
-	return new_type('INTEGER', 0)
+	return new_type('INTEGER', 0, 0)
 }
 
 fn parse_smallint() ?Type {
-	return new_type('SMALLINT', 0)
+	return new_type('SMALLINT', 0, 0)
 }
 
 fn parse_varchar(length string) ?Type {
-	return new_type('CHARACTER VARYING', length.int())
+	return new_type('CHARACTER VARYING', length.int(), 0)
 }
 
 fn parse_character_n(length string) ?Type {
-	return new_type('CHARACTER', length.int())
+	return new_type('CHARACTER', length.int(), 0)
 }
 
 fn parse_character() ?Type {
-	return new_type('CHARACTER', 1)
+	return new_type('CHARACTER', 1, 0)
 }
 
 fn parse_double_precision() ?Type {
-	return new_type('DOUBLE PRECISION', 0)
+	return new_type('DOUBLE PRECISION', 0, 0)
 }
 
 fn parse_float_n(length string) ?Type {
-	return new_type('FLOAT', length.int())
+	return new_type('FLOAT', length.int(), 0)
 }
 
 fn parse_float() ?Type {
-	return new_type('FLOAT', 0)
+	return new_type('FLOAT', 0, 0)
 }
 
 fn parse_real() ?Type {
-	return new_type('REAL', 0)
+	return new_type('REAL', 0, 0)
 }
 
 fn parse_drop_table_statement(table_name Identifier) ?Stmt {
@@ -243,16 +243,30 @@ fn parse_value(v Value) ?Value {
 	return v
 }
 
-fn parse_exact_numeric_literal1(a string, b string) ?Value {
-	mut v := new_double_precision_value('${a}.$b'.f64())
-	v.is_coercible = true
+fn parse_exact_numeric_literal1(a string) ?Value {
+	mut v := new_numeric_value(new_numeric_from_string(a))
+	v.typ.is_coercible = true
 
 	return v
 }
 
 fn parse_exact_numeric_literal2(a string) ?Value {
-	mut v := new_double_precision_value('0.$a'.f64())
-	v.is_coercible = true
+	mut v := new_numeric_value(new_numeric_from_string(a))
+	v.typ.is_coercible = true
+
+	return v
+}
+
+fn parse_exact_numeric_literal3(a string, b string) ?Value {
+	mut v := new_numeric_value(new_numeric_from_string('${a}.$b'))
+	v.typ.is_coercible = true
+
+	return v
+}
+
+fn parse_exact_numeric_literal4(a string) ?Value {
+	mut v := new_numeric_value(new_numeric_from_string('0.$a'))
+	v.typ.is_coercible = true
 
 	return v
 }
@@ -317,7 +331,7 @@ fn parse_comparison(expr Expr, comp ComparisonPredicatePart2) ?Expr {
 }
 
 fn parse_boolean_type() ?Type {
-	return new_type('BOOLEAN', 0)
+	return new_type('BOOLEAN', 0, 0)
 }
 
 fn parse_true() ?Value {
@@ -662,17 +676,17 @@ fn parse_string(s string) ?string {
 
 fn parse_int_value(x string) ?Value {
 	mut v := new_bigint_value(x.i64())
-	v.is_coercible = true
+	v.typ.is_coercible = true
 
 	return v
 }
 
 fn parse_timestamp_prec_tz_type(prec string, tz bool) ?Type {
 	if tz {
-		return new_type('TIMESTAMP WITH TIME ZONE', prec.int())
+		return new_type('TIMESTAMP WITH TIME ZONE', prec.int(), 0)
 	}
 
-	return new_type('TIMESTAMP WITHOUT TIME ZONE', prec.int())
+	return new_type('TIMESTAMP WITHOUT TIME ZONE', prec.int(), 0)
 }
 
 fn parse_timestamp_prec_type(prec string) ?Type {
@@ -691,10 +705,10 @@ fn parse_timestamp_type() ?Type {
 
 fn parse_time_prec_tz_type(prec string, tz bool) ?Type {
 	if tz {
-		return new_type('TIME WITH TIME ZONE', prec.int())
+		return new_type('TIME WITH TIME ZONE', prec.int(), 0)
 	}
 
-	return new_type('TIME WITHOUT TIME ZONE', prec.int())
+	return new_type('TIME WITHOUT TIME ZONE', prec.int(), 0)
 }
 
 fn parse_time_type() ?Type {
@@ -710,19 +724,19 @@ fn parse_time_tz_type(tz bool) ?Type {
 }
 
 fn parse_date_type() ?Type {
-	return new_type('DATE', 0)
+	return new_type('DATE', 0, 0)
 }
 
 fn parse_timestamp_literal(v Value) ?Value {
-	return new_timestamp_value(v.string_value)
+	return new_timestamp_value(v.string_value())
 }
 
 fn parse_time_literal(v Value) ?Value {
-	return new_time_value(v.string_value)
+	return new_time_value(v.string_value())
 }
 
 fn parse_date_literal(v Value) ?Value {
-	return new_date_value(v.string_value)
+	return new_date_value(v.string_value())
 }
 
 fn parse_current_date() ?Expr {
@@ -815,4 +829,28 @@ fn parse_boolean_test1(e Expr, v Value) ?Expr {
 
 fn parse_boolean_test2(e Expr, v Value) ?Expr {
 	return TruthExpr{e, true, v}
+}
+
+fn parse_decimal1() ?Type {
+	return new_type('DECIMAL', 0, 0)
+}
+
+fn parse_decimal2(precision string) ?Type {
+	return new_type('DECIMAL', precision.int(), 0)
+}
+
+fn parse_decimal3(precision string, scale int) ?Type {
+	return new_type('DECIMAL', precision.int(), i16(scale))
+}
+
+fn parse_numeric1() ?Type {
+	return new_type('NUMERIC', 0, 0)
+}
+
+fn parse_numeric2(precision string) ?Type {
+	return new_type('NUMERIC', precision.int(), 0)
+}
+
+fn parse_numeric3(precision string, scale int) ?Type {
+	return new_type('NUMERIC', precision.int(), i16(scale))
 }

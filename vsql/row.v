@@ -3,6 +3,7 @@
 
 module vsql
 
+import math.big
 import time
 
 struct Row {
@@ -35,7 +36,7 @@ pub fn (r Row) get_null(name string) ?bool {
 pub fn (r Row) get_f64(name string) ?f64 {
 	value := r.get(name)?
 	if value.typ.uses_f64() {
-		return value.f64_value
+		return value.f64_value()
 	}
 
 	return error("cannot use get_f64('$name') when type is $value.typ")
@@ -46,7 +47,7 @@ pub fn (r Row) get_f64(name string) ?f64 {
 pub fn (r Row) get_int(name string) ?int {
 	value := r.get(name)?
 	if value.typ.uses_int() {
-		return int(value.int_value)
+		return int(value.int_value())
 	}
 
 	return error("cannot use get_int('$name') when type is $value.typ")
@@ -71,7 +72,7 @@ pub fn (r Row) get_bool(name string) ?Boolean {
 
 	match value.typ.typ {
 		.is_boolean {
-			return value.bool_value
+			return value.bool_value()
 		}
 		else {
 			return error("cannot use get_bool('$name') when type is $value.typ")
@@ -113,7 +114,7 @@ fn new_empty_row(columns Columns, table_name string) Row {
 fn new_empty_value(typ Type) Value {
 	mut value := match typ.typ {
 		.is_date, .is_time_with_time_zone, .is_time_without_time_zone,
-		.is_timestamp_with_time_zone, .is_timestamp_without_time_zone {
+		.is_timestamp_with_time_zone, .is_timestamp_without_time_zone, .is_decimal, .is_numeric {
 			new_null_value(typ.typ)
 		}
 		.is_bigint {
@@ -170,6 +171,7 @@ fn (r Row) bytes(t Table) []u8 {
 		// If the column is allows for NULL we need to prepend a NULL indicator.
 		// However, there are certain types that we do not need to add a
 		// separate NULL indicator because it's built into the value itself.
+		mut should_write := false
 		if !col.not_null {
 			match col.typ.typ {
 				.is_varchar, .is_character, .is_date, .is_time_with_time_zone,
@@ -178,39 +180,44 @@ fn (r Row) bytes(t Table) []u8 {
 				.is_real, .is_smallint {
 					buf.write_bool(v.is_null)
 				}
-				.is_boolean {
+				.is_boolean, .is_decimal, .is_numeric {
 					// BOOLEAN: NULL is encoded as one of the values.
+					// DECIMAL and NUMERIC: NULL is encoded with flags.
+					should_write = true
 				}
 			}
 		}
 
 		// If v is null, there's not need to write any more information.
-		if !v.is_null || col.typ.typ == .is_boolean {
+		if !v.is_null || should_write {
 			match col.typ.typ {
 				.is_boolean {
-					buf.write_u8(u8(v.bool_value))
+					buf.write_u8(u8(v.bool_value()))
 				}
 				.is_bigint {
-					buf.write_i64(v.int_value)
+					buf.write_i64(v.int_value())
 				}
 				.is_double_precision {
-					buf.write_f64(v.f64_value)
+					buf.write_f64(v.f64_value())
 				}
 				.is_integer {
-					buf.write_i32(int(v.int_value))
+					buf.write_i32(int(v.int_value()))
 				}
 				.is_real {
-					buf.write_f32(f32(v.f64_value))
+					buf.write_f32(f32(v.f64_value()))
 				}
 				.is_smallint {
-					buf.write_i16(i16(v.int_value))
+					buf.write_i16(i16(v.int_value()))
 				}
 				.is_varchar, .is_character {
-					buf.write_string4(v.string_value)
+					buf.write_string4(v.string_value())
 				}
 				.is_date, .is_time_with_time_zone, .is_time_without_time_zone,
 				.is_timestamp_with_time_zone, .is_timestamp_without_time_zone {
-					buf.write_u8s(v.time_value.bytes())
+					buf.write_u8s(v.time_value().bytes())
+				}
+				.is_decimal, .is_numeric {
+					buf.write_u8s(v.numeric_value().bytes())
 				}
 			}
 		}
@@ -235,6 +242,7 @@ fn new_row_from_bytes(t Table, data []u8, tid int, table_name string) Row {
 		// indicator. However, there are certain types that we do not need to
 		// add a separate NULL indicator because it's built into the value
 		// itself.
+		mut should_read := false
 		if !col.not_null {
 			match col.typ.typ {
 				.is_varchar, .is_character, .is_date, .is_time_with_time_zone,
@@ -243,59 +251,80 @@ fn new_row_from_bytes(t Table, data []u8, tid int, table_name string) Row {
 				.is_real, .is_smallint {
 					v.is_null = buf.read_bool()
 				}
-				.is_boolean {
+				.is_boolean, .is_decimal, .is_numeric {
 					// BOOLEAN: NULL is encoded as one of the values.
+					// DECIMAL and NUMERIC: NULL is encoded with flags.
+					should_read = true
 				}
 			}
 		}
 
 		// The value is only written if it's not null (or NULL is encoded into
 		// the value).
-		if !v.is_null || v.typ.typ == .is_boolean {
+		if !v.is_null || should_read {
 			match col.typ.typ {
 				.is_boolean {
-					v.bool_value = Boolean(buf.read_u8())
-					if v.bool_value == .is_unknown {
+					v.v = InternalValue{bool_value: Boolean(buf.read_u8())}
+					if v.bool_value() == .is_unknown {
 						v.is_null = true
 					}
 				}
 				.is_bigint {
-					v.int_value = buf.read_i64()
+					v.v = InternalValue{int_value: buf.read_i64()}
 				}
 				.is_double_precision {
-					v.f64_value = buf.read_f64()
+					v.v = InternalValue{f64_value: buf.read_f64()}
 				}
 				.is_integer {
-					v.int_value = buf.read_i32()
+					v.v = InternalValue{int_value: buf.read_i32()}
 				}
 				.is_real {
-					v.f64_value = buf.read_f32()
+					v.v = InternalValue{f64_value: buf.read_f32()}
 				}
 				.is_smallint {
-					v.int_value = buf.read_i16()
+					v.v = InternalValue{int_value: buf.read_i16()}
 				}
 				.is_varchar, .is_character {
-					v.string_value = buf.read_string4()
+					v.v = InternalValue{string_value: buf.read_string4()}
 				}
 				.is_date {
-					typ := Type{.is_date, col.typ.size, col.not_null}
-					v.time_value = new_time_from_bytes(typ, buf.read_u8s(8))
+					typ := Type{.is_date, col.typ.size, 0, col.not_null, false}
+					v.v = InternalValue{time_value: new_time_from_bytes(typ, buf.read_u8s(8))}
 				}
 				.is_time_with_time_zone {
-					typ := Type{.is_time_with_time_zone, col.typ.size, col.not_null}
-					v.time_value = new_time_from_bytes(typ, buf.read_u8s(10))
+					typ := Type{.is_time_with_time_zone, col.typ.size, 0, col.not_null, false}
+					v.v = InternalValue{time_value: new_time_from_bytes(typ, buf.read_u8s(10))}
 				}
 				.is_time_without_time_zone {
-					typ := Type{.is_time_without_time_zone, col.typ.size, col.not_null}
-					v.time_value = new_time_from_bytes(typ, buf.read_u8s(8))
+					typ := Type{.is_time_without_time_zone, col.typ.size, 0, col.not_null, false}
+					v.v = InternalValue{time_value: new_time_from_bytes(typ, buf.read_u8s(8))}
 				}
 				.is_timestamp_with_time_zone {
-					typ := Type{.is_timestamp_with_time_zone, col.typ.size, col.not_null}
-					v.time_value = new_time_from_bytes(typ, buf.read_u8s(10))
+					typ := Type{.is_timestamp_with_time_zone, col.typ.size, 0, col.not_null, false}
+					v.v = InternalValue{time_value: new_time_from_bytes(typ, buf.read_u8s(10))}
 				}
 				.is_timestamp_without_time_zone {
-					typ := Type{.is_timestamp_without_time_zone, col.typ.size, col.not_null}
-					v.time_value = new_time_from_bytes(typ, buf.read_u8s(8))
+					typ := Type{.is_timestamp_without_time_zone, col.typ.size, 0, col.not_null, false}
+					v.v = InternalValue{time_value: new_time_from_bytes(typ, buf.read_u8s(8))}
+				}
+				.is_decimal, .is_numeric {
+					flags := buf.read_u8()
+					mut numerator := big.zero_int
+					mut denominator := big.one_int
+
+					// If it's NULL or 0 there's nothing more to read.
+					if !(flags & numeric_is_null != 0 || flags & numeric_is_zero != 0) {
+						numerator_len := buf.read_i16()
+						numerator = big.integer_from_bytes(buf.read_u8s(numerator_len),
+							big.IntegerConfig{})
+
+						denominator_len := buf.read_i16()
+						denominator = big.integer_from_bytes(buf.read_u8s(denominator_len),
+							big.IntegerConfig{})
+					}
+
+					v.v = InternalValue{numeric_value: new_numeric(col.typ, flags & numeric_is_positive != 0,
+						numerator, denominator)}
 				}
 			}
 		}
@@ -319,13 +348,13 @@ fn (mut r Row) object_key(t Table) ?[]u8 {
 			col := t.column(col_name)?
 			match col.typ.typ {
 				.is_bigint {
-					pk.write_i64(r.data[col_name].int_value)
+					pk.write_i64(r.data[col_name].int_value())
 				}
 				.is_integer {
-					pk.write_i32(int(r.data[col_name].int_value))
+					pk.write_i32(int(r.data[col_name].int_value()))
 				}
 				.is_smallint {
-					pk.write_i16(i16(r.data[col_name].int_value))
+					pk.write_i16(i16(r.data[col_name].int_value()))
 				}
 				else {
 					return error('cannot use $col.typ.str() in PRIMARY KEY')
