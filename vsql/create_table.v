@@ -4,8 +4,6 @@ module vsql
 
 import time
 
-// TODO(elliotchance): A table is allowed to have zero columns.
-
 fn execute_create_table(mut c Connection, stmt CreateTableStmt, elapsed_parse time.Duration) !Result {
 	t := start_timer()
 
@@ -28,7 +26,9 @@ fn execute_create_table(mut c Connection, stmt CreateTableStmt, elapsed_parse ti
 		table_name = 'PUBLIC.$table_name'
 	}
 
-	if table_name in c.storage.tables {
+	table := c.storage.get_table_by_name(table_name) or { Table{} }
+	println(c.storage.tables)
+	if table.name != "" {
 		return sqlstate_42p07(table_name) // duplicate table
 	}
 
